@@ -44,6 +44,7 @@ pub mod console_utils;
 pub mod database;
 pub mod doodle;
 pub mod notifications;
+pub mod mention_monitor;
 pub mod ollama;
 pub mod onboarding;
 pub mod openai;
@@ -596,6 +597,7 @@ pub fn run() {
 
             log::info!("Starting application...");
 
+            mention_monitor::initialize(_app.handle()).map_err(std::io::Error::other)?;
             #[cfg(target_os = "windows")]
             match _app.path().resolve(
                 "onnxruntime.dll",
@@ -719,6 +721,11 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "mention-alert" {
+                    api.prevent_close();
+                    mention_monitor::dismiss_window(window.app_handle());
+                    return;
+                }
                 if window.label() == "main" {
                     api.prevent_close();
                     if let Err(e) = window.hide() {
@@ -897,6 +904,13 @@ pub fn run() {
             set_language_preference,
             // Notification system commands
             notifications::commands::get_notification_settings,
+            mention_monitor::mention_monitor_snapshot,
+            mention_monitor::mention_monitor_save_config,
+            mention_monitor::mention_monitor_set_enabled,
+            mention_monitor::mention_monitor_snooze,
+            mention_monitor::mention_monitor_dismiss,
+            mention_monitor::mention_monitor_test,
+            mention_monitor::mention_monitor_view_transcript,
             notifications::commands::set_notification_settings,
             notifications::commands::request_notification_permission,
             notifications::commands::show_notification,

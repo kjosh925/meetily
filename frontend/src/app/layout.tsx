@@ -25,6 +25,7 @@ import { RecordingPostProcessingProvider } from '@/contexts/RecordingPostProcess
 import { ImportAudioDialog, ImportDropOverlay } from '@/components/ImportAudio'
 import { ImportDialogProvider } from '@/contexts/ImportDialogContext'
 import { isAudioExtension, getAudioFormatsDisplayList } from '@/constants/audioFormats'
+import { usePathname } from 'next/navigation'
 
 
 const sourceSans3 = Source_Sans_3({
@@ -68,6 +69,15 @@ export default function RootLayout({
 }: {
   children: React.ReactNode
 }) {
+  const pathname = usePathname();
+  // The alert window must not mount recording, onboarding, analytics, or import providers.
+  if (pathname === '/mention-alert') {
+    return <html lang="en"><body className={`${sourceSans3.variable} font-sans antialiased`}>{children}</body></html>;
+  }
+  return <MainLayout>{children}</MainLayout>;
+}
+
+function MainLayout({ children }: { children: React.ReactNode }) {
   const [showOnboarding, setShowOnboarding] = useState(false)
   const [onboardingCompleted, setOnboardingCompleted] = useState(false)
 

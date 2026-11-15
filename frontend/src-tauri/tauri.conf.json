@@ -38,6 +38,12 @@
             },
             "capabilities": [
                 {
+                    "identifier": "mention-alert",
+                    "description": "Mention popup can receive monitor events",
+                    "windows": ["mention-alert"],
+                    "permissions": ["core:event:default", "core:window:default"]
+                },
+                {
                     "identifier": "main",
                     "description": "Main window capability with file system and media access",
                     "windows": [

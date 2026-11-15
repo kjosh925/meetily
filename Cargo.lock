@@ -3675,6 +3675,7 @@ dependencies = [
  "time",
  "tokio",
  "tokio-util",
+ "unicode-normalization",
  "url",
  "uuid",
  "whatlang",

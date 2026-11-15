@@ -30,6 +30,8 @@ pub struct ContinuousVadProcessor {
     speech_start_sample: usize,
     last_logged_state: bool,
     large_speech_buffer_warned: bool,
+    live_windows: super::live_speech_windows::LiveSpeechWindows,
+    allow_live_windows: bool,
 }
 
 impl ContinuousVadProcessor {
@@ -84,8 +86,12 @@ impl ContinuousVadProcessor {
             speech_start_sample: 0,
             last_logged_state: false,
             large_speech_buffer_warned: false,
+            live_windows: Default::default(),
+            allow_live_windows: false,
         })
     }
+
+    pub fn enable_live_windows(&mut self) { self.allow_live_windows = true; }
 
     /// Process incoming audio samples and return any complete speech segments
     /// Handles resampling from input sample rate to 16kHz for VAD processing
@@ -104,6 +110,20 @@ impl ContinuousVadProcessor {
         while self.buffer.len() >= self.chunk_size {
             let chunk: Vec<f32> = self.buffer.drain(..self.chunk_size).collect();
             self.process_chunk(&chunk)?;
+
+            // Monitoring needs bounded delivery even when the speaker never pauses.
+            // Keep Silero's state intact; trim the eventual SpeechEnd to the un-emitted tail.
+            if self.allow_live_windows && self.in_speech && crate::mention_monitor::live_windowing_enabled() {
+                let active = self.session.get_current_speech();
+                while let Some(range) = self.live_windows.ready(active.len()) {
+                    self.speech_segments.push_back(SpeechSegment {
+                        samples: active[range.clone()].to_vec(),
+                        start_timestamp_ms: (self.speech_start_sample + range.start) as f64 / 16.0,
+                        end_timestamp_ms: (self.speech_start_sample + range.end) as f64 / 16.0,
+                        confidence: 0.8,
+                    });
+                }
+            }
 
             // Extract any completed speech segments
             while let Some(segment) = self.speech_segments.pop_front() {
@@ -206,9 +226,10 @@ impl ContinuousVadProcessor {
                     real_sample_count
                 ));
             }
-            let samples = active_speech[..real_sample_count].to_vec();
+            let tail = self.live_windows.tail(real_sample_count);
+            let samples = active_speech[tail.clone()].to_vec();
             let start_ms =
-                (self.speech_start_sample as f64 / VAD_SAMPLE_RATE as f64) * 1000.0;
+                ((self.speech_start_sample + tail.start) as f64 / VAD_SAMPLE_RATE as f64) * 1000.0;
             let end_ms = (real_end_sample as f64 / VAD_SAMPLE_RATE as f64) * 1000.0;
 
             debug!("VAD flush: Force-ending speech - start={}ms, end={}ms, duration={}ms, samples={}",
@@ -264,6 +285,7 @@ impl ContinuousVadProcessor {
                     // surfaced once per recording, on the final segment — which landed at
                     // ~2x the file duration and sorted to the end of the transcript.
                     self.speech_start_sample = timestamp_ms * VAD_SAMPLE_RATE as usize / 1000;
+                    self.live_windows = Default::default();
                     self.current_speech.clear();
                 }
                 VadTransition::SpeechEnd { start_timestamp_ms, end_timestamp_ms, samples } => {
@@ -281,10 +303,11 @@ impl ContinuousVadProcessor {
                         self.current_speech.clone()
                     };
 
-                    if !speech_samples.is_empty() {
+                    let tail = self.live_windows.tail(speech_samples.len());
+                    if !tail.is_empty() {
                         let segment = SpeechSegment {
-                            samples: speech_samples,
-                            start_timestamp_ms: start_timestamp_ms as f64,
+                            samples: speech_samples[tail.clone()].to_vec(),
+                            start_timestamp_ms: start_timestamp_ms as f64 + tail.start as f64 / 16.0,
                             end_timestamp_ms: end_timestamp_ms as f64,
                             confidence: 0.9, // VAD confidence
                         };
@@ -436,6 +459,35 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_windows_deliver_before_silence_and_flush_only_the_tail() {
+        use std::sync::atomic::Ordering;
+        struct Reset(bool);
+        impl Drop for Reset {
+            fn drop(&mut self) { crate::mention_monitor::LIVE_WINDOWS_ENABLED.store(self.0, Ordering::Relaxed); }
+        }
+        let _reset = Reset(crate::mention_monitor::LIVE_WINDOWS_ENABLED.swap(true, Ordering::Relaxed));
+        let speech = generate_test_audio_with_speech(5.0, 16000);
+        let mut audio = vec![0.0; 2 * 16000];
+        for _ in 0..3 { audio.extend_from_slice(&speech); }
+        let mut processor = ContinuousVadProcessor::new(16000, 500).unwrap();
+        processor.enable_live_windows();
+        let mut segments = Vec::new();
+        for chunk in audio.chunks(480) { segments.extend(processor.process_audio(chunk).unwrap()); }
+        assert!(!segments.is_empty(), "Uninterrupted speech must be delivered before flush");
+        let before_flush = segments.len();
+        segments.extend(processor.flush().unwrap());
+        assert!(segments.len() >= before_flush);
+        assert!(segments.iter().all(|s| s.samples.len() <= 3 * 16000 + 480));
+        for segment in &segments {
+            assert!(segment.end_timestamp_ms > segment.start_timestamp_ms);
+            assert!(segment.end_timestamp_ms <= audio.len() as f64 / 16.0 + 1.0);
+            assert!((segment.samples.len() as f64 / 16.0 -
+                (segment.end_timestamp_ms - segment.start_timestamp_ms)).abs() < 1.0);
+        }
+        assert!(segments.windows(2).all(|s| s[1].start_timestamp_ms > s[0].start_timestamp_ms));
+    }
 
     /// Generate synthetic speech-like audio with alternating speech/silence
     fn generate_test_audio_with_speech(duration_seconds: f32, sample_rate: u32) -> Vec<f32> {

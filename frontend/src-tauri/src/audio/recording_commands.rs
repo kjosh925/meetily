@@ -133,6 +133,11 @@ fn finalize_recording_start() {
 
 // Global recording manager and transcription task to keep them alive during recording
 static RECORDING_MANAGER: Mutex<Option<RecordingManager>> = Mutex::new(None);
+
+/// Best-effort clock for monitoring diagnostics; never blocks audio/transcription.
+pub(crate) fn monitor_audio_time() -> Option<f64> {
+    RECORDING_MANAGER.try_lock().ok()?.as_ref()?.get_recording_duration()
+}
 static TRANSCRIPTION_TASK: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
 
 // Listener ID for proper cleanup - prevents microphone from staying active after recording stops
@@ -897,6 +902,9 @@ async fn stop_recording_for_session<R: Runtime>(
         }
     };
 
+    // Disable live alerts before flushing the admitted session.
+    crate::mention_monitor::stop(&app);
+
     // Emit shutdown progress to frontend
     let _ = app.emit(
         "recording-shutdown-progress",
@@ -1325,6 +1333,7 @@ pub async fn pause_recording<R: Runtime>(app: AppHandle<R>) -> Result<(), String
     let manager_guard = RECORDING_MANAGER.lock().unwrap();
     if let Some(manager) = manager_guard.as_ref() {
         manager.pause_recording().map_err(|e| e.to_string())?;
+        crate::mention_monitor::pause(&app, true, manager.get_recording_duration());
 
         // Emit pause event to frontend
         app.emit(
@@ -1359,6 +1368,7 @@ pub async fn resume_recording<R: Runtime>(app: AppHandle<R>) -> Result<(), Strin
     let manager_guard = RECORDING_MANAGER.lock().unwrap();
     if let Some(manager) = manager_guard.as_ref() {
         manager.resume_recording().map_err(|e| e.to_string())?;
+        crate::mention_monitor::pause(&app, false, manager.get_recording_duration());
 
         // Emit resume event to frontend
         app.emit(

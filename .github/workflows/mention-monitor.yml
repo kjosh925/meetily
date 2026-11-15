@@ -1,0 +1,52 @@
+name: Mention monitor
+
+on:
+  pull_request:
+    paths:
+      - 'frontend/src-tauri/src/mention_monitor/**'
+      - 'frontend/src-tauri/src/audio/**'
+      - 'frontend/src-tauri/tests/mention-monitor/**'
+      - 'frontend/src-tauri/src/lib.rs'
+      - 'frontend/src-tauri/tauri.conf.json'
+      - 'frontend/src/components/Mention*.tsx'
+      - 'frontend/src/components/MainContent/**'
+      - 'frontend/src/hooks/useMentionMonitor.ts'
+      - 'frontend/src/app/mention-alert/**'
+      - 'frontend/src/app/layout.tsx'
+      - 'frontend/src/app/settings/page.tsx'
+      - '.github/workflows/mention-monitor.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  policy:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test monitor policy, local AI validation, and speech windows
+        run: cargo test --manifest-path frontend/src-tauri/tests/mention-monitor/Cargo.toml
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+        working-directory: frontend
+      - run: pnpm exec tsc --noEmit
+        working-directory: frontend
+      - run: pnpm build
+        working-directory: frontend

@@ -182,12 +182,14 @@ pub fn start_transcription_task<R: Runtime>(
     app: AppHandle<R>,
     transcription_receiver: tokio::sync::mpsc::UnboundedReceiver<AudioChunk>,
 ) -> tokio::task::JoinHandle<()> {
+    let monitor_session = crate::mention_monitor::start_session(&app);
     tokio::spawn(async move {
         info!("Starting transcription worker task");
 
         let transcription_engine = match super::engine::get_or_init_transcription_engine(&app).await {
             Ok(engine) => engine,
             Err(e) => {
+                crate::mention_monitor::stop_session(&app, monitor_session);
                 error!("Failed to initialize transcription engine");
                 let _ = app.emit("transcription-error", serde_json::json!({
                     "error": e,
@@ -199,6 +201,11 @@ pub fn start_transcription_task<R: Runtime>(
             }
         };
 
+        crate::mention_monitor::set_local_transcription(
+            &app,
+            monitor_session,
+            matches!(&transcription_engine, TranscriptionEngine::Whisper(_) | TranscriptionEngine::Parakeet(_)),
+        );
         const NUM_WORKERS: usize = 1;
         let (work_sender, work_receiver) = tokio::sync::mpsc::unbounded_channel::<AudioChunk>();
         let work_receiver = Arc::new(tokio::sync::Mutex::new(work_receiver));
@@ -237,6 +244,7 @@ pub fn start_transcription_task<R: Runtime>(
                     let processing_started = Instant::now();
 
                     if !engine_clone.is_model_loaded().await {
+                        crate::mention_monitor::transcription_failed(&app_clone, monitor_session);
                         stats.record_failure(WorkerFailureCategory::ModelNotLoaded);
                     } else {
                         match transcribe_chunk_with_provider(&engine_clone, chunk, &app_clone).await {
@@ -282,6 +290,7 @@ pub fn start_transcription_task<R: Runtime>(
                                         duration: chunk_duration,
                                     };
 
+                                    crate::mention_monitor::observe(&app_clone, monitor_session, &update);
                                     if app_clone.emit("transcript-update", &update).is_ok() {
                                         stats.emitted += 1;
                                         #[cfg(debug_assertions)]
@@ -303,9 +312,11 @@ pub fn start_transcription_task<R: Runtime>(
                                 stats.too_short += 1;
                             }
                             Err(TranscriptionError::ModelNotLoaded) => {
+                                crate::mention_monitor::transcription_failed(&app_clone, monitor_session);
                                 stats.record_failure(WorkerFailureCategory::ModelNotLoaded);
                             }
                             Err(error @ TranscriptionError::EngineFailed(_)) => {
+                                crate::mention_monitor::transcription_failed(&app_clone, monitor_session);
                                 stats.record_failure(WorkerFailureCategory::EngineFailed);
                                 warn!("Transcription engine failed: {}", error);
                                 let _ =

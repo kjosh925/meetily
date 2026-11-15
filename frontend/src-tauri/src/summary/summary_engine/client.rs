@@ -137,6 +137,18 @@ pub async fn generate_with_builtin(
     user_prompt: &str,
     cancellation_token: Option<&CancellationToken>,
 ) -> Result<String> {
+    generate_with_builtin_limit(app_data_dir, model_name, system_prompt, user_prompt, cancellation_token, models::DEFAULT_MAX_TOKENS).await
+}
+
+/// Bounded generation for short interactive tasks, sharing the summary engine.
+pub async fn generate_with_builtin_limit(
+    app_data_dir: &PathBuf, model_name: &str, system_prompt: &str, user_prompt: &str,
+    cancellation_token: Option<&CancellationToken>, max_tokens: i32,
+) -> Result<String> {
+    // Serialize the entire model selection/request/response transaction. The sidecar
+    // has one output pipe; concurrent summaries and catch-ups must not swap replies.
+    static GENERATION_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+    let _generation_guard = GENERATION_LOCK.lock().await;
     // Check cancellation at start
     if let Some(token) = cancellation_token {
         if token.is_cancelled() {
@@ -179,10 +191,14 @@ pub async fn generate_with_builtin(
     }
 
     // Prepare generation request with model-specific sampling parameters
-    let sampling = model_def.sampling.sanitize_for_llama_helper();
+    let sampling = if max_tokens < models::DEFAULT_MAX_TOKENS {
+        models::SamplingParams::tight_structured(model_def.sampling.stop_tokens.clone())
+    } else {
+        model_def.sampling.clone()
+    }.sanitize_for_llama_helper();
     let request = Request::Generate {
         prompt: formatted_prompt,
-        max_tokens: Some(models::DEFAULT_MAX_TOKENS),
+        max_tokens: Some(max_tokens),
         context_size: Some(model_def.context_size),
         model_path: Some(model_path.to_string_lossy().to_string()),
         temperature: Some(sampling.temperature),
