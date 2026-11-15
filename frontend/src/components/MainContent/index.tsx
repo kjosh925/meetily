@@ -2,6 +2,8 @@
 
 import React from 'react';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
+import { MentionMonitorBar } from '@/components/MentionMonitorBar';
+import { MentionCatchUp } from '@/components/MentionCatchUp';
 
 interface MainContentProps {
   children: React.ReactNode;
@@ -17,6 +19,8 @@ const MainContent: React.FC<MainContentProps> = ({ children }) => {
       }`}
     >
       <div className="pl-8 min-w-0 w-full max-w-full overflow-hidden">
+        <MentionMonitorBar />
+        <MentionCatchUp />
         {children}
       </div>
     </main>

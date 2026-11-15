@@ -52,6 +52,7 @@ pub fn start_transcription_task<R: Runtime>(
     app: AppHandle<R>,
     transcription_receiver: tokio::sync::mpsc::UnboundedReceiver<AudioChunk>,
 ) -> tokio::task::JoinHandle<()> {
+    let monitor_session = crate::mention_monitor::start_session(&app);
     tokio::spawn(async move {
         info!("🚀 Starting optimized parallel transcription task - guaranteeing zero chunk loss");
 
@@ -59,6 +60,7 @@ pub fn start_transcription_task<R: Runtime>(
         let transcription_engine = match super::engine::get_or_init_transcription_engine(&app).await {
             Ok(engine) => engine,
             Err(e) => {
+                crate::mention_monitor::stop_session(&app, monitor_session);
                 error!("Failed to initialize transcription engine: {}", e);
                 let _ = app.emit("transcription-error", serde_json::json!({
                     "error": e,
@@ -69,6 +71,9 @@ pub fn start_transcription_task<R: Runtime>(
                 return;
             }
         };
+
+        crate::mention_monitor::set_local_transcription(&app, monitor_session,
+            matches!(&transcription_engine, TranscriptionEngine::Whisper(_) | TranscriptionEngine::Parakeet(_)));
 
         // Create parallel workers for faster processing while preserving ALL chunks
         const NUM_WORKERS: usize = 1; // Serial processing ensures transcripts emit in chronological order
@@ -141,6 +146,7 @@ pub fn start_transcription_task<R: Runtime>(
 
                             // Check if model is still loaded before processing
                             if !engine_clone.is_model_loaded().await {
+                                crate::mention_monitor::transcription_failed(&app_clone, monitor_session);
                                 warn!("⚠️ Worker {}: Model unloaded, but continuing to preserve chunk {}", worker_id, chunk.chunk_id);
                                 // Still count as completed even if we can't process
                                 chunks_completed_clone.fetch_add(1, Ordering::SeqCst);
@@ -217,6 +223,8 @@ pub fn start_transcription_task<R: Runtime>(
                                             duration: chunk_duration,
                                         };
 
+                                        crate::mention_monitor::observe(&app_clone, monitor_session, &update);
+
                                         if let Err(e) = app_clone.emit("transcript-update", &update)
                                         {
                                             error!(
@@ -237,11 +245,13 @@ pub fn start_transcription_task<R: Runtime>(
                                             continue;
                                         }
                                         TranscriptionError::ModelNotLoaded => {
+                                            crate::mention_monitor::transcription_failed(&app_clone, monitor_session);
                                             warn!("Worker {}: Model unloaded during transcription", worker_id);
                                             chunks_completed_clone.fetch_add(1, Ordering::SeqCst);
                                             continue;
                                         }
                                         _ => {
+                                            crate::mention_monitor::transcription_failed(&app_clone, monitor_session);
                                             warn!("Worker {}: Transcription failed: {}", worker_id, e);
                                             let _ = app_clone.emit("transcription-warning", e.to_string());
                                         }
